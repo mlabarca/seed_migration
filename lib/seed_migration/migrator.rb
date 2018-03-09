@@ -9,64 +9,81 @@ module SeedMigration
       Rails.root.join("db", SeedMigration.migrations_path)
     end
 
-    def self.migration_path(filename)
+    def self.migration_path(filename, tenant = nil)
+      return data_migration_directory.join('multitenancy', tenant, filename).to_s if tenant.present?
       data_migration_directory.join(filename).to_s
     end
 
-    def initialize(migration_path)
+    def initialize(migration_path, tenant)
       @path = Pathname.new(migration_path)
+      @tenant = tenant
       raise "Can't find migration at #{@path}." if !@path.exist?
     end
 
     def up
       # Check if we already migrated this file
       klass = class_from_path
+      tenant = @tenant || tenant_from_path
       version, _ = self.class.parse_migration_filename(@path)
-      raise "#{klass} has already been migrated." if SeedMigration::DataMigration.where(version: version).first
+      begin      
+        raise "#{klass} has already been migrated." if SeedMigration::DataMigration.where(version: version).first
 
-      start_time = Time.now
-      announce("#{klass}: migrating")
-      ActiveRecord::Base.transaction do
-        klass.new.up
-        end_time = Time.now
-        runtime = (end_time - start_time).to_d.round(2)
+        start_time = Time.now
+        announce("#{klass}: migrating")
+        ActiveRecord::Base.transaction do
+          klass.new.up
+          end_time = Time.now
+          runtime = (end_time - start_time).to_d.round(2)
 
-        # Create record
-        migration = SeedMigration::DataMigration.new
-        migration.version = version
-        migration.runtime = runtime.to_i
-        migration.migrated_on = DateTime.now
-        begin
-          migration.save!
-        rescue StandardError => e
-          SeedMigration::Migrator.logger.error e
+          # Create record
+          migration = SeedMigration::DataMigration.new
+          migration.version = version
+          migration.runtime = runtime.to_i
+          migration.migrated_on = DateTime.now
+          begin
+            migration.save!
+          rescue StandardError => e
+            SeedMigration::Migrator.logger.error e
+          end
+          announce("#{klass}: migrated (#{runtime}s)")
         end
-        announce("#{klass}: migrated (#{runtime}s)")
+        
+      rescue Apartment::TenantNotFound => e
+        puts e.message
       end
     end
 
     def down
       klass = class_from_path
+      tenant = tenant_from_path
       version = @path.basename.to_s.split("_", 2).first
+      
+      begin
+        
+          # Get migration record
+          migration = SeedMigration::DataMigration.where(version: version).first
 
-      # Get migration record
-      migration = SeedMigration::DataMigration.where(version: version).first
+          # Do not proceed without it!
+          raise "#{klass} hasn't been migrated." if migration.nil?
 
-      # Do not proceed without it!
-      raise "#{klass} hasn't been migrated." if migration.nil?
+          # Revert
+          start_time = Time.now
+          announce("#{klass}: reverting")
+          ActiveRecord::Base.transaction do
+            klass.new.down
+            end_time = Time.now
+            runtime = (end_time - start_time).to_d.round(2)
 
-      # Revert
-      start_time = Time.now
-      announce("#{klass}: reverting")
-      ActiveRecord::Base.transaction do
-        klass.new.down
-        end_time = Time.now
-        runtime = (end_time - start_time).to_d.round(2)
+            # Delete record of migration
+            migration.destroy
+            announce("#{klass}: reverted (#{runtime}s)")
+          end
 
-        # Delete record of migration
-        migration.destroy
-        announce("#{klass}: reverted (#{runtime}s)")
+      rescue Apartment::TenantNotFound => e
+        puts e.message
       end
+
+      
     end
 
     def self.check_pending!
@@ -76,40 +93,47 @@ module SeedMigration
     end
 
     # Rake methods
-    def self.run_new_migrations
+    def self.run_new_migrations(tenant)
       # TODO : Add warning about empty registered_models
-      get_new_migrations.each do |migration|
-        migration = migration_path(migration)
-        new(migration).up
+      get_new_migrations(tenant).each do |migration|
+        migration = migration_path(migration, tenant)
+        new(migration, tenant).up
       end
     end
 
-    def self.run_migrations(filename = nil)
-      if filename.blank?
-        # Run any outstanding migrations
-        run_new_migrations
-      else
-        path = self.migration_path(filename)
-        new(path).up
+    def self.run_migrations(filename = nil, tenant = nil)
+      Apartment::Tenant.switch(tenant) do
+        if filename.blank?
+          # Run any outstanding migrations
+          run_new_migrations(tenant)
+        else
+          path = self.migration_path(filename, tenant)
+          new(path, tenant).up
+        end
       end
-      create_seed_file
+      # Disable bootstrap for multitenancy
+      #create_seed_file
     end
 
     def self.last_migration
       return SeedMigration::DataMigration.maximum("version")
     end
 
-    def self.rollback_migrations(filename = nil, steps = 1)
-      if filename.blank?
-        to_run = get_last_x_migrations(steps)
-        to_run.each do |migration|
-          new(migration).down
+    def self.rollback_migrations(filename: nil, steps: 1, tenant: nil)
+      Apartment::Tenant.switch(tenant) do
+        if filename.blank?
+          to_run = get_last_x_migrations(x: steps, tenant: tenant)
+          to_run.each do |migration|
+            new(migration, tenant).down
+          end
+        else
+          path = migration_path(filename, tenant)
+          new(path, tenant).down
         end
-      else
-        path = migration_path(filename)
-        new(path).down
       end
-      create_seed_file
+
+      # Disable bootstrap for multitenancy
+      #create_seed_file
     end
 
     def self.display_migrations_status
@@ -127,7 +151,7 @@ module SeedMigration
 
     def self.bootstrap(last_timestamp = nil)
       logger.info "Assume seed data migrated up to #{last_timestamp}"
-      files = get_migration_files(last_timestamp.to_s)
+      files = get_migration_files(last_timestamp: last_timestamp.to_s)
       files.each do |file|
         migration = SeedMigration::DataMigration.new
         migration.version, _ = parse_migration_filename(file)
@@ -157,14 +181,21 @@ module SeedMigration
       classname.constantize
     end
 
+    def tenant_from_path
+      # Get directory of seed file to check we are in tenant's directory (db/seeds/tenant or db/seeds )
+      migration_directory = @path.to_s.rpartition('/').first
+      return unless Rails.root.join(migration_directory).to_s != self.class.data_migration_directory.to_s
+      migration_directory.rpartition('/').last
+    end
+
     def announce(text)
       length = [0, 75 - text.length].max
       SeedMigration::Migrator.logger.info "== %s %s" % [text, "=" * length]
     end
 
-    def self.get_new_migrations
+    def self.get_new_migrations(tenant = nil)
       migrations = []
-      files = get_migration_files
+      files = get_migration_files(tenant: tenant)
 
       # If there is no last migration, all migrations are new
       if get_last_migration_date.nil?
@@ -187,13 +218,13 @@ module SeedMigration
       return migrations
     end
 
-    def self.get_last_x_migrations(x = 1)
+    def self.get_last_x_migrations(x: 1, tenant: nil)
       # Grab data from DB
       migrations = SeedMigration::DataMigration.order("version DESC").limit(x).pluck("version")
 
       # Get actual files to load
       to_rollback = []
-      files = get_migration_files
+      files = get_migration_files(tenant: tenant)
       migrations.each do |migration|
         files.each do |file|
           if !file.split('/').last[migration].nil?
@@ -210,17 +241,23 @@ module SeedMigration
       DateTime.parse(last_migration)
     end
 
-    def self.get_migration_files(last_timestamp = nil)
+    def self.get_migration_files(last_timestamp: nil, tenant: nil)
       files = Dir.glob(migration_path("*_*.rb"))
+      tenant_files = tenant ? Dir.glob(migration_path("*_*.rb", tenant)) : []
       if last_timestamp.present?
         files.delete_if do |file|
+          timestamp = File.basename(file).split('_').first
+          timestamp > last_timestamp
+        end
+
+        tenant_files.delete_if do |file|
           timestamp = File.basename(file).split('_').first
           timestamp > last_timestamp
         end
       end
 
       # Just in case
-      files.sort!
+      (files + tenant_files).sort!
     end
 
     def self.get_all_migration_versions

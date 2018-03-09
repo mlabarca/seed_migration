@@ -4,6 +4,7 @@ gemspec
 
 gem "rails", ">= 3.2.17"
 gem "rack", ">= 1.4.5"
+gem "apartment"
 
 case ENV['DB']
 when 'postgresql'
