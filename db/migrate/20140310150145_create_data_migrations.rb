@@ -3,7 +3,6 @@ class CreateDataMigrations < ActiveRecord::Migration[4.2]
     create_table SeedMigration.migration_table_name do |t|
       t.string :version
       t.integer :runtime
-      t.string :tenant
       t.datetime :migrated_on
     end
   end

@@ -10,6 +10,7 @@ module SeedMigration
     end
 
     def self.migration_path(filename, tenant = nil)
+      # TODO: allow passing a folder name to use with tenants
       return data_migration_directory.join('multitenancy', tenant, filename).to_s if tenant.present?
       data_migration_directory.join(filename).to_s
     end
@@ -23,67 +24,53 @@ module SeedMigration
     def up
       # Check if we already migrated this file
       klass = class_from_path
-      tenant = @tenant || tenant_from_path
       version, _ = self.class.parse_migration_filename(@path)
-      begin      
-        raise "#{klass} has already been migrated." if SeedMigration::DataMigration.where(version: version).first
 
-        start_time = Time.now
-        announce("#{klass}: migrating")
-        ActiveRecord::Base.transaction do
-          klass.new.up
-          end_time = Time.now
-          runtime = (end_time - start_time).to_d.round(2)
+      raise "#{klass} has already been migrated." if SeedMigration::DataMigration.where(version: version).first
 
-          # Create record
-          migration = SeedMigration::DataMigration.new
-          migration.version = version
-          migration.runtime = runtime.to_i
-          migration.migrated_on = DateTime.now
-          begin
-            migration.save!
-          rescue StandardError => e
-            SeedMigration::Migrator.logger.error e
-          end
-          announce("#{klass}: migrated (#{runtime}s)")
+      start_time = Time.now
+      announce("#{klass}: migrating")
+      ActiveRecord::Base.transaction do
+        klass.new.up
+        end_time = Time.now
+        runtime = (end_time - start_time).to_d.round(2)
+
+        # Create record
+        migration = SeedMigration::DataMigration.new
+        migration.version = version
+        migration.runtime = runtime.to_i
+        migration.migrated_on = DateTime.now
+        begin
+          migration.save!
+        rescue StandardError => e
+          SeedMigration::Migrator.logger.error e
         end
-        
-      rescue Apartment::TenantNotFound => e
-        puts e.message
+        announce("#{klass}: migrated (#{runtime}s)")
       end
     end
 
     def down
       klass = class_from_path
-      tenant = tenant_from_path
       version = @path.basename.to_s.split("_", 2).first
-      
-      begin
-        
-          # Get migration record
-          migration = SeedMigration::DataMigration.where(version: version).first
 
-          # Do not proceed without it!
-          raise "#{klass} hasn't been migrated." if migration.nil?
+      # Get migration record
+      migration = SeedMigration::DataMigration.where(version: version).first
 
-          # Revert
-          start_time = Time.now
-          announce("#{klass}: reverting")
-          ActiveRecord::Base.transaction do
-            klass.new.down
-            end_time = Time.now
-            runtime = (end_time - start_time).to_d.round(2)
+      # Do not proceed without it!
+      raise "#{klass} hasn't been migrated." if migration.nil?
 
-            # Delete record of migration
-            migration.destroy
-            announce("#{klass}: reverted (#{runtime}s)")
-          end
+      # Revert
+      start_time = Time.now
+      announce("#{klass}: reverting")
+      ActiveRecord::Base.transaction do
+        klass.new.down
+        end_time = Time.now
+        runtime = (end_time - start_time).to_d.round(2)
 
-      rescue Apartment::TenantNotFound => e
-        puts e.message
+        # Delete record of migration
+        migration.destroy
+        announce("#{klass}: reverted (#{runtime}s)")
       end
-
-      
     end
 
     def self.check_pending!
@@ -112,6 +99,7 @@ module SeedMigration
         end
       end
       # Disable bootstrap for multitenancy
+      # TODO : Find a way to turn on seed migrate back
       #create_seed_file
     end
 
@@ -179,13 +167,6 @@ module SeedMigration
       classname_and_extension = filename.split("_", 2).last
       classname = classname_and_extension.split(".").first.camelize
       classname.constantize
-    end
-
-    def tenant_from_path
-      # Get directory of seed file to check we are in tenant's directory (db/seeds/tenant or db/seeds )
-      migration_directory = @path.to_s.rpartition('/').first
-      return unless Rails.root.join(migration_directory).to_s != self.class.data_migration_directory.to_s
-      migration_directory.rpartition('/').last
     end
 
     def announce(text)
