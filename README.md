@@ -1,4 +1,44 @@
-[![Build Status](https://travis-ci.org/harrystech/seed_migration.svg?branch=master)](https://travis-ci.org/harrystech/seed_migration) [![Gem Version](https://badge.fury.io/rb/seed_migration.svg)](http://badge.fury.io/rb/seed_migration) [![Code Climate](https://codeclimate.com/repos/565d2ab865f101004800136a/badges/22e9c1da0befd44cac82/gpa.svg)](https://codeclimate.com/repos/565d2ab865f101004800136a/feed) [![Test Coverage](https://codeclimate.com/repos/565d2ab865f101004800136a/badges/22e9c1da0befd44cac82/coverage.svg)](https://codeclimate.com/repos/565d2ab865f101004800136a/coverage)
+
+# What is this fork?
+
+This is a VERY quick fork of the seed_migration gem to handle our specific case of multitenancy. Assuming you have folders setup as db/seeds/multitenancy and in there you have specific seeds for each of your tenants, this will run the migrations on db/seeds and then for those for each specific tenant.
+
+For example, assuming db/seeds has the following:
+
+```
+multitenancy/
+  tenant1/
+    2016030310_tenant1_seed.rb
+2016030303_seed_for_all.rb
+```
+This will run seed `2016030303_seed_for_all.rb` and then `2016030310_tenant1_seed.rb` :
+
+`rake seed:migrate['tenant1']`
+
+This will rollback those two migrations:
+
+`rake seed:rollback['tenant1'] STEPS=2`
+
+To add seed files, run the generator as normal, and move tenant specific seeds to their folders in `multitenancy/tenant_name`. Consider that this gem internally creates a record to the database every time a migration is run and stores its version, but since this fork simply switches the tenant before those records are created, you can share migrations between tenants by leaving them in db/seeds.
+
+You can use this gem to make for example a rake task to migrate all your tenants in your project that uses the Apartment Gem:
+
+```
+task :migrate => [:environment] do
+  Apartment::tenant_names.each do |tenant|
+    puts("Seeding #{tenant} tenant")
+    Rake::Task['seed:migrate'].invoke(tenant)
+    Rake::Task['seed:migrate'].reenable
+  end
+end
+```
+
+TODO:
+  * Add tests checking tenants
+  * Allow passing another folder name in an initializer instead of expecting 'multitenancy'
+
+Standard gem documentation follows below.
+
 
 # SeedMigration
 
